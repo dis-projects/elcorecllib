@@ -1,6 +1,8 @@
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 find_package(Threads REQUIRED)
 
+set(BUILD_SHARED_LIBS TRUE)
+
 if(${BUILD_SHARED_LIBS})
     set(Boost_USE_STATIC_LIBS OFF)
 else()

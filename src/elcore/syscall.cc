@@ -166,7 +166,7 @@ void ElcoreSyscallHandler(int job_instance_fd, int job_fd) {
     struct tms ret_tms;
     struct stat_compat *stat_compat;
     struct tms_compat *tms_compat;
-    char *el50_env, *env_buf;
+    char *el50_env, *env_buf = NULL;
     void *tmp = NULL;
     uint32_t *el50_env_size, full_needed_size;
     int flags;

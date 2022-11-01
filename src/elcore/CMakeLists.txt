@@ -12,7 +12,7 @@ if(BUILD_FOR_MCOM03)
     target_compile_definitions(elcore PRIVATE -DBUILD_FOR_MCOM03)
 endif()
 target_include_directories(elcore
-    PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/../../include>
+    PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/../include>
       $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
       $<INSTALL_INTERFACE:include>)
 
