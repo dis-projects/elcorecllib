@@ -21,6 +21,7 @@ define Package/elcorecllib/install
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/include/elcorecl/* $(1)/usr/include/elcorecl
 	$(INSTALL_DIR) $(1)/usr/lib
 	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/libelcore.so  $(1)/usr/lib/
+	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/librisc1.so  $(1)/usr/lib/
 	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/libelcorecl.so  $(1)/usr/lib/
 endef
 

@@ -1,4 +1,4 @@
-// Copyright 2018 RnD Center "ELVEES", JSC
+// Copyright 2018-2022 RnD Center "ELVEES", JSC
 
 #include <mutex>
 #include <utility>
@@ -8,7 +8,8 @@
 
 #include "elcore-cl.h"
 
-std::pair<ecl_int, bool> CheckIfNodeNeedToWaitEvent(ecl_command_queue_node *node,
+template <typename T>
+std::pair<ecl_int, bool> CheckIfNodeNeedToWaitEvent(ecl_command_queue_node<T> *node,
                                                     _ecl_event *event) {
     bool need_to_wait_before_submit = false;
     ecl_int command_status;
@@ -34,12 +35,13 @@ std::pair<ecl_int, bool> CheckIfNodeNeedToWaitEvent(ecl_command_queue_node *node
     return std::make_pair(command_status, need_to_wait_before_submit);
 }
 
-void AdvanceCommandQueueNode(ecl_command_queue_node *node) {
+template <typename T>
+void AdvanceCommandQueueNode(ecl_command_queue_node<T> *node) {
     bool need_to_wait_before_submit = false;
     for (std::size_t i = 0; i < node->m_wait_list.size(); ++i) {
         boost::intrusive_ptr<_ecl_event> event = node->m_wait_list[i];
         std::unique_lock<std::mutex> lock(event->m_mutex);
-        need_to_wait_before_submit |= CheckIfNodeNeedToWaitEvent(node, event.get()).second;
+        need_to_wait_before_submit |= CheckIfNodeNeedToWaitEvent<T>(node, event.get()).second;
     }
     ecl_map_flags flags;
     size_t offset, cb;
@@ -79,10 +81,11 @@ void AdvanceCommandQueueNode(ecl_command_queue_node *node) {
     }
 }
 
+template<typename T>
 void ECL_CALLBACK WaitNodeCallback(ecl_event, ecl_int, void *user_data) {
     // @TODO: check errors
-    ecl_command_queue_node *node = reinterpret_cast<ecl_command_queue_node *>(user_data);
-    AdvanceCommandQueueNode(node);
+    ecl_command_queue_node<T> *node = reinterpret_cast<ecl_command_queue_node<T> *>(user_data);
+    AdvanceCommandQueueNode<T>(node);
 
     {
         std::unique_lock<std::mutex> lock(node->m_queue->m_commands_list_guard);
@@ -92,21 +95,114 @@ void ECL_CALLBACK WaitNodeCallback(ecl_event, ecl_int, void *user_data) {
     node->release();
 }
 
-bool FillWaitListCallback(boost::intrusive_ptr<ecl_command_queue_node> node) {
+template <typename T>
+bool FillWaitListCallback(boost::intrusive_ptr<ecl_command_queue_node<T>> node) {
     bool need_to_wait_before_submit = false;
     for (std::size_t i = 0; i < node->m_wait_list.size(); ++i) {
         boost::intrusive_ptr<_ecl_event> event = node->m_wait_list[i];
         std::unique_lock<std::mutex> lock(event->m_mutex);
-        std::pair<ecl_int, bool> check_result = CheckIfNodeNeedToWaitEvent(node.get(), event.get());
+        std::pair<ecl_int, bool> check_result = CheckIfNodeNeedToWaitEvent<T>(node.get(), event.get());
         need_to_wait_before_submit |= check_result.second;
         if (check_result.second) {
             node->add_ref();
             event->m_callbacks[check_result.first]
             .push_back(std::pair<void(ECL_CALLBACK *)(ecl_event, ecl_int, void *), void *>(
-                       WaitNodeCallback, node.get()));
+                       WaitNodeCallback<T>, node.get()));
         }
     }
     return need_to_wait_before_submit;
+}
+
+template <typename T>
+static ecl_int enqueueKernel(ecl_command_queue command_queuent, ecl_kernel kernel,
+    _ecl_program *programnt, ecl_uint num_events_in_wait_list,
+    const ecl_event *event_wait_list, ecl_event *event, int dev_num)
+{
+    _ecl_programT<T> *program = reinterpret_cast<_ecl_programT<T>*>(programnt);
+    _ecl_command_queueT<T>* command_queue
+        = reinterpret_cast<_ecl_command_queueT<T>*>(command_queuent);
+    boost::intrusive_ptr<ecl_command_queue_node<T>> node = new ecl_command_queue_node<T>();
+    node->m_kernel = new _ecl_kernel_instance<T>();
+    node->m_kernel->m_job_instance = program->m_job_instance_templates[dev_num];
+    typename T::job_instance &job_instance = node->m_kernel->m_job_instance;
+
+    {
+        std::unique_lock<std::mutex> lock(kernel->m_kernel_guard);
+        job_instance.argc = kernel->m_args.size();
+        for (auto it = kernel->m_args.cbegin(); it != kernel->m_args.cend(); ++it) {
+            const ecl_uint index = it->first;
+            const ecl_uint type = it->second.first;
+            switch (type) {
+                case ECL_KERNEL_ARG_TYPE_BASIC: {
+                    job_instance.args[index].type = T::TYPE_BASIC;
+                    node->m_basic_args_copy.push_back(it->second.second);
+                    const std::vector<uint8_t> &data = node->m_basic_args_copy.back();
+                    job_instance.args[index].basic.p = reinterpret_cast<uintptr_t>(data.data());
+                    job_instance.args[index].basic.size = data.size();
+                    break;
+                }
+                case ECL_KERNEL_ARG_TYPE_NC_GLOBAL:
+                case ECL_KERNEL_ARG_TYPE_GLOBAL: {
+                    if (type == ECL_KERNEL_ARG_TYPE_GLOBAL)
+                        job_instance.args[index].type = T::TYPE_GLOBAL_MEMORY;
+                    else
+                        job_instance.args[index].type = T::TYPE_NC_GLOBAL_MEMORY;
+                    node->m_mem_args_ref.emplace_back(
+                        *reinterpret_cast<const ecl_mem *>(it->second.second.data()));
+                    ecl_mem mem = node->m_mem_args_ref.back().get();
+                    job_instance.args[index].global_memory.mapper_fd = mem->mapper_fd;
+                    break;
+                }
+                case ECL_KERNEL_ARG_TYPE_LOCAL:
+                    job_instance.args[index].type = T::TYPE_LOCAL_MEMORY;
+                    job_instance.args[index].local_memory.size =
+                        *reinterpret_cast<const size_t *>(it->second.second.data());
+                    break;
+                case ECL_KERNEL_ARG_TYPE_DMA: {
+                    job_instance.args[index].type = T::TYPE_DMA_MEMORY;
+                    node->m_mem_args_ref.emplace_back(
+                        *reinterpret_cast<const ecl_mem *>(it->second.second.data()));
+                    ecl_mem mem = node->m_mem_args_ref.back().get();
+                    job_instance.args[index].dma_memory.mapper_fd = mem->mapper_fd;
+                    break;
+                }
+            }
+        }
+    }
+    job_instance.entry_point_virtual_address = kernel->m_kernel_addr;
+    strncpy(job_instance.name, kernel->m_kernel_name.c_str(), sizeof(job_instance.name));
+    job_instance.debug_enable = 0;
+
+    node->m_event =
+        new _ecl_event(command_queue->m_context.get(), command_queue, ECL_COMMAND_NDRANGE_KERNEL);
+    node->m_queue = command_queue;
+    if (num_events_in_wait_list) {
+        node->m_wait_list.assign(event_wait_list, event_wait_list + num_events_in_wait_list);
+    }
+    {
+        std::unique_lock<std::mutex> lock(command_queue->m_commands_list_guard);
+        if (command_queue->m_last_command_in_queue != nullptr) {
+            node->m_wait_list.push_back(command_queue->m_last_command_in_queue->m_event);
+        }
+    }
+    if (!FillWaitListCallback<T>(node)) {
+        if (command_queue->m_device->enqueue_job(&node->m_kernel->m_job_instance) != 0) {
+            return ECL_INVALID_CONTEXT;  // @TODO: return correct error
+        }
+        node->m_event->set_command_status(ECL_SUBMITTED);
+        {
+            std::unique_lock<std::mutex> lock(command_queue->m_commands_list_guard);
+            command_queue->m_submitted_kernels_list.push_back(node);
+            command_queue->m_last_command_in_queue = node;
+        }
+        command_queue->m_commands_list_cond.notify_all();
+    }
+    if (event) {
+        node->m_event->add_ref();
+        *event = node->m_event.get();
+    }
+
+    return ECL_SUCCESS;
 }
 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
@@ -165,60 +261,26 @@ eclEnqueueNDRangeKernel(ecl_command_queue command_queue, ecl_kernel kernel, ecl_
         return ECL_INVALID_CONTEXT;
     }
 
-    boost::intrusive_ptr<ecl_command_queue_node> node = new ecl_command_queue_node();
-    node->m_kernel = new _ecl_kernel_instance();
-    node->m_kernel->m_job_instance = program->m_job_instance_templates[dev_num];
-    elcore50_job_instance &job_instance = node->m_kernel->m_job_instance;
+    if (command_queue->getPlatform() == 0)
+        return enqueueKernel<elcore50>(command_queue, kernel, program.get(),
+            num_events_in_wait_list, event_wait_list, event, dev_num);
 
-    {
-        std::unique_lock<std::mutex> lock(kernel->m_kernel_guard);
-        job_instance.argc = kernel->m_args.size();
-        for (auto it = kernel->m_args.cbegin(); it != kernel->m_args.cend(); ++it) {
-            const ecl_uint index = it->first;
-            const ecl_uint type = it->second.first;
-            switch (type) {
-                case ECL_KERNEL_ARG_TYPE_BASIC: {
-                    job_instance.args[index].type = ELCORE50_TYPE_BASIC;
-                    node->m_basic_args_copy.push_back(it->second.second);
-                    const std::vector<uint8_t> &data = node->m_basic_args_copy.back();
-                    job_instance.args[index].basic.p = reinterpret_cast<uintptr_t>(data.data());
-                    job_instance.args[index].basic.size = data.size();
-                    break;
-                }
-                case ECL_KERNEL_ARG_TYPE_NC_GLOBAL:
-                case ECL_KERNEL_ARG_TYPE_GLOBAL: {
-                    if (type == ECL_KERNEL_ARG_TYPE_GLOBAL)
-                        job_instance.args[index].type = ELCORE50_TYPE_GLOBAL_MEMORY;
-                    else
-                        job_instance.args[index].type = ELCORE50_TYPE_NC_GLOBAL_MEMORY;
-                    node->m_mem_args_ref.emplace_back(
-                        *reinterpret_cast<const ecl_mem *>(it->second.second.data()));
-                    ecl_mem mem = node->m_mem_args_ref.back().get();
-                    job_instance.args[index].global_memory.mapper_fd = mem->m_mem_info.mapper_fd;
-                    break;
-                }
-                case ECL_KERNEL_ARG_TYPE_LOCAL:
-                    job_instance.args[index].type = ELCORE50_TYPE_LOCAL_MEMORY;
-                    job_instance.args[index].local_memory.size =
-                        *reinterpret_cast<const size_t *>(it->second.second.data());
-                    break;
-                case ECL_KERNEL_ARG_TYPE_DMA: {
-                    job_instance.args[index].type = ELCORE50_TYPE_DMA_MEMORY;
-                    node->m_mem_args_ref.emplace_back(
-                        *reinterpret_cast<const ecl_mem *>(it->second.second.data()));
-                    ecl_mem mem = node->m_mem_args_ref.back().get();
-                    job_instance.args[index].dma_memory.mapper_fd = mem->m_mem_info.mapper_fd;
-                    break;
-                }
-            }
-        }
-    }
-    job_instance.entry_point_virtual_address = kernel->m_kernel_addr;
-    strncpy(job_instance.name, kernel->m_kernel_name.c_str(), sizeof(job_instance.name));
-    job_instance.debug_enable = 0;
+    return enqueueKernel<risc1>(command_queue, kernel, program.get(),
+        num_events_in_wait_list, event_wait_list, event, dev_num);
+}
 
+template<typename T>
+static void *eclEnqueueMapBufferT(ecl_command_queue command_queuent, ecl_mem memobj,
+    ecl_bool blocking_map, ecl_map_flags map_flags, size_t offset, size_t cb,
+    ecl_uint num_events_in_wait_list, const ecl_event *event_wait_list,
+    ecl_event *event, ecl_int *errcode_ret)
+{
+    _ecl_command_queueT<T> *command_queue
+        = reinterpret_cast<_ecl_command_queueT<T> *>(command_queuent);
+    boost::intrusive_ptr<ecl_command_queue_node<T>> node
+        = new ecl_command_queue_node<T>();
     node->m_event =
-        new _ecl_event(command_queue->m_context.get(), command_queue, ECL_COMMAND_NDRANGE_KERNEL);
+        new _ecl_event(command_queue->m_context.get(), command_queue, ECL_COMMAND_MAP_BUFFER);
     node->m_queue = command_queue;
     if (num_events_in_wait_list) {
         node->m_wait_list.assign(event_wait_list, event_wait_list + num_events_in_wait_list);
@@ -229,23 +291,34 @@ eclEnqueueNDRangeKernel(ecl_command_queue command_queue, ecl_kernel kernel, ecl_
             node->m_wait_list.push_back(command_queue->m_last_command_in_queue->m_event);
         }
     }
-    if (!FillWaitListCallback(node)) {
-        if (command_queue->m_device->enqueue_job(&node->m_kernel->m_job_instance) != 0) {
-            return ECL_INVALID_CONTEXT;  // @TODO: return correct error
+    boost::intrusive_ptr<_ecl_sync_object_instance> sync
+        = new _ecl_sync_object_instance();
+    sync->m_memobj = memobj;
+    sync->m_map_flags = map_flags;
+    sync->m_cb = cb;
+    sync->m_offset = offset;
+
+    node->m_sync_object = sync;
+
+    if (!FillWaitListCallback<T>(node)) {
+        if (memobj->sync_for_host(offset, cb, map_flags) != 0) {
+            *errcode_ret = ECL_DEVICE_NOT_AVAILABLE;
+            return NULL;
         }
-        node->m_event->set_command_status(ECL_SUBMITTED);
-        {
-            std::unique_lock<std::mutex> lock(command_queue->m_commands_list_guard);
-            command_queue->m_submitted_kernels_list.push_back(node);
-            command_queue->m_last_command_in_queue = node;
-        }
-        command_queue->m_commands_list_cond.notify_all();
+        node->m_event->set_command_status(ECL_COMPLETE);
     }
     if (event) {
         node->m_event->add_ref();
         *event = node->m_event.get();
     }
-    return ECL_SUCCESS;
+
+    if (blocking_map) {
+        ecl_event block_event = node->m_event.get();
+        eclWaitForEvents(1, &block_event);
+    }
+
+    if (errcode_ret) *errcode_ret = ECL_SUCCESS;
+    return memobj->m_host_ptr + offset;
 }
 
 extern "C" ECL_API_ENTRY void * ECL_API_CALL
@@ -301,9 +374,28 @@ eclEnqueueMapBuffer(ecl_command_queue command_queue, ecl_mem memobj, ecl_bool bl
         }
     }
 
-    boost::intrusive_ptr<ecl_command_queue_node> node = new ecl_command_queue_node();
+    if (command_queue->getPlatform() == 0)
+        return eclEnqueueMapBufferT<elcore50>(command_queue, memobj, blocking_map,
+            map_flags, offset, cb, num_events_in_wait_list, event_wait_list, event,
+            errcode_ret);
+
+    return eclEnqueueMapBufferT<risc1>(command_queue, memobj, blocking_map,
+        map_flags, offset, cb, num_events_in_wait_list, event_wait_list, event,
+        errcode_ret);
+}
+
+template <typename T>
+static ecl_int eclEnqueueUnmapMemObjectT(ecl_command_queue command_queuent, ecl_mem memobj, void *mapped_ptr,
+                         ecl_uint num_events_in_wait_list, const ecl_event *event_wait_list,
+                         ecl_event *event)
+{
+    _ecl_command_queueT<T> *command_queue
+        = reinterpret_cast<_ecl_command_queueT<T> *>(command_queuent);
+    boost::intrusive_ptr<ecl_command_queue_node<T>> node
+        = new ecl_command_queue_node<T>();
     node->m_event =
-        new _ecl_event(command_queue->m_context.get(), command_queue, ECL_COMMAND_MAP_BUFFER);
+        new _ecl_event(command_queue->m_context.get(), command_queue,
+                       ECL_COMMAND_UNMAP_MEM_OBJECT);
     node->m_queue = command_queue;
     if (num_events_in_wait_list) {
         node->m_wait_list.assign(event_wait_list, event_wait_list + num_events_in_wait_list);
@@ -316,16 +408,12 @@ eclEnqueueMapBuffer(ecl_command_queue command_queue, ecl_mem memobj, ecl_bool bl
     }
     boost::intrusive_ptr<_ecl_sync_object_instance> sync = new _ecl_sync_object_instance();
     sync->m_memobj = memobj;
-    sync->m_map_flags = map_flags;
-    sync->m_cb = cb;
-    sync->m_offset = offset;
 
     node->m_sync_object = sync;
 
-    if (!FillWaitListCallback(node)) {
-        if (memobj->sync_for_host(offset, cb, map_flags) != 0) {
-            *errcode_ret = ECL_DEVICE_NOT_AVAILABLE;
-            return NULL;
+    if (!FillWaitListCallback<T>(node)) {
+        if (memobj->sync_for_device() != 0) {
+            return ECL_DEVICE_NOT_AVAILABLE;
         }
         node->m_event->set_command_status(ECL_COMPLETE);
     }
@@ -334,13 +422,7 @@ eclEnqueueMapBuffer(ecl_command_queue command_queue, ecl_mem memobj, ecl_bool bl
         *event = node->m_event.get();
     }
 
-    if (blocking_map) {
-        ecl_event block_event = node->m_event.get();
-        eclWaitForEvents(1, &block_event);
-    }
-
-    if (errcode_ret) *errcode_ret = ECL_SUCCESS;
-    return memobj->m_host_ptr + offset;
+    return ECL_SUCCESS;
 }
 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
@@ -364,35 +446,10 @@ eclEnqueueUnmapMemObject(ecl_command_queue command_queue, ecl_mem memobj, void *
         }
     }
 
-    boost::intrusive_ptr<ecl_command_queue_node> node = new ecl_command_queue_node();
-    node->m_event =
-        new _ecl_event(command_queue->m_context.get(), command_queue,
-                       ECL_COMMAND_UNMAP_MEM_OBJECT);
-    node->m_queue = command_queue;
-    if (num_events_in_wait_list) {
-        node->m_wait_list.assign(event_wait_list, event_wait_list + num_events_in_wait_list);
-    }
-    {
-        std::unique_lock<std::mutex> lock(command_queue->m_commands_list_guard);
-        if (command_queue->m_last_command_in_queue != nullptr) {
-            node->m_wait_list.push_back(command_queue->m_last_command_in_queue->m_event);
-        }
-    }
-    boost::intrusive_ptr<_ecl_sync_object_instance> sync = new _ecl_sync_object_instance();
-    sync->m_memobj = memobj;
+    if (command_queue->getPlatform() == 0)
+        return eclEnqueueUnmapMemObjectT<elcore50>(command_queue, memobj, mapped_ptr,
+            num_events_in_wait_list, event_wait_list, event);
 
-    node->m_sync_object = sync;
-
-    if (!FillWaitListCallback(node)) {
-        if (memobj->sync_for_device() != 0) {
-            return ECL_DEVICE_NOT_AVAILABLE;
-        }
-        node->m_event->set_command_status(ECL_COMPLETE);
-    }
-    if (event) {
-        node->m_event->add_ref();
-        *event = node->m_event.get();
-    }
-
-    return ECL_SUCCESS;
+    return eclEnqueueUnmapMemObjectT<risc1>(command_queue, memobj, mapped_ptr,
+        num_events_in_wait_list, event_wait_list, event);
 }

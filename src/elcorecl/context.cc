@@ -19,7 +19,11 @@ eclCreateContext(const ecl_context_properties *properties, ecl_uint num_devices,
         return nullptr;
     }
 
-    boost::intrusive_ptr<_ecl_context> context(new _ecl_context(
+    boost::intrusive_ptr<_ecl_context> context(
+        (devices[0]->getPlatform()==0)
+        ?(ecl_context)new _ecl_contextT<elcore50>(
+        std::vector<_ecl_device_id *>(devices, devices + num_devices), pfn_notify, user_data)
+        :(ecl_context)new _ecl_contextT<risc1>(
         std::vector<_ecl_device_id *>(devices, devices + num_devices), pfn_notify, user_data));
     context->add_ref();
 

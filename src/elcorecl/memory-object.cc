@@ -85,7 +85,9 @@ eclCreateBuffer(ecl_context context, ecl_mem_flags flags, size_t size, void* hos
     madvise(host_ptr, size, MADV_HUGEPAGE);
 
     boost::intrusive_ptr<_ecl_mem> mem =
-        new _ecl_mem(context, flags, size, host_ptr, ECL_MEM_OBJECT_BUFFER);
+        (context->getPlatform() == 0)
+        ?(_ecl_mem *)new _ecl_memT<elcore50>(context, flags, size, host_ptr, ECL_MEM_OBJECT_BUFFER)
+        :(_ecl_mem *)new _ecl_memT<risc1>(context, flags, size, host_ptr, ECL_MEM_OBJECT_BUFFER);
 
     if (errcode_ret != nullptr) *errcode_ret = ECL_SUCCESS;
     mem->add_ref();
@@ -108,7 +110,9 @@ eclCreateBufferFromDmaBuf(ecl_context context, ecl_mem_flags flags, ecl_int fd, 
     }
 
     boost::intrusive_ptr<_ecl_mem> mem =
-        new _ecl_mem(context, flags | ECL_MEM_USE_DMABUF, size, NULL, ECL_MEM_OBJECT_BUFFER, fd);
+        (context->getPlatform() == 0)
+        ?(_ecl_mem *)new _ecl_memT<elcore50>(context, flags | ECL_MEM_USE_DMABUF, size, NULL, ECL_MEM_OBJECT_BUFFER, fd)
+        :(_ecl_mem *)new _ecl_memT<risc1>(context, flags | ECL_MEM_USE_DMABUF, size, NULL, ECL_MEM_OBJECT_BUFFER, fd);
 
     if (errcode_ret != nullptr) *errcode_ret = ECL_SUCCESS;
     mem->add_ref();
@@ -128,7 +132,9 @@ eclCreateDMABuffer(ecl_context context, ecl_mem_flags flags, size_t size, void* 
     madvise(host_ptr, size, MADV_HUGEPAGE);
 
     boost::intrusive_ptr<_ecl_mem> mem =
-        new _ecl_mem(context, flags, size, host_ptr, ECL_MEM_OBJECT_BUFFER);
+        (context->getPlatform() == 0)
+        ?(_ecl_mem *)new _ecl_memT<elcore50>(context, flags, size, host_ptr, ECL_MEM_OBJECT_BUFFER)
+        :(_ecl_mem *)new _ecl_memT<risc1>(context, flags, size, host_ptr, ECL_MEM_OBJECT_BUFFER);
 
     if (errcode_ret != nullptr) *errcode_ret = ECL_SUCCESS;
     mem->add_ref();
@@ -149,13 +155,12 @@ eclReleaseMemObject(ecl_mem memobj) ECL_API_SUFFIX__VERSION_1_0 {
     return ECL_SUCCESS;
 }
 
-extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
-eclGetMemObjectInfo(ecl_mem memobj, ecl_mem_info param_name, size_t param_value_size,
-                    void* param_value, size_t* param_value_size_ret) ECL_API_SUFFIX__VERSION_1_0 {
-    if (memobj == nullptr) {
-        return ECL_INVALID_MEM_OBJECT;
-    }
-
+template <typename T>
+static ecl_int
+eclGetMemObjectInfoT(ecl_mem memobjnt, ecl_mem_info param_name, size_t param_value_size,
+                    void* param_value, size_t* param_value_size_ret)
+{
+    _ecl_memT<T> *memobj = reinterpret_cast<_ecl_memT<T> *>(memobjnt);
     switch (param_name) {
         case ECL_MEM_TYPE:
             ECL_RETURN_GETINFO(ecl_mem_object_type, memobj->m_type);
@@ -180,6 +185,21 @@ eclGetMemObjectInfo(ecl_mem memobj, ecl_mem_info param_name, size_t param_value_
             ECL_RETURN_GETINFO(size_t, 0);
     }
     return ECL_INVALID_VALUE;
+}
+
+extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
+eclGetMemObjectInfo(ecl_mem memobj, ecl_mem_info param_name, size_t param_value_size,
+                    void* param_value, size_t* param_value_size_ret) ECL_API_SUFFIX__VERSION_1_0 {
+
+    if (memobj == nullptr) {
+        return ECL_INVALID_MEM_OBJECT;
+    }
+
+    if (memobj->getPlatform() == 0)
+        return eclGetMemObjectInfoT<elcore50>(memobj, param_name, param_value_size,
+            param_value, param_value_size_ret);
+    return eclGetMemObjectInfoT<risc1>(memobj, param_name, param_value_size, param_value,
+        param_value_size_ret);
 }
 
 #ifdef ECL_VERSION_1_1

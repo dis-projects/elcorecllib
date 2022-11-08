@@ -1,4 +1,4 @@
-// Copyright 2018 RnD Center "ELVEES", JSC
+// Copyright 2018-2022 RnD Center "ELVEES", JSC
 #include <cassert>
 #include <ctime>
 #include <mutex>
@@ -7,9 +7,10 @@
 
 #include "elcore-cl.h"
 
-void _ecl_command_queue::PollThread() {
+template <typename T>
+void _ecl_command_queueT<T>::PollThread() {
     do {
-        boost::intrusive_ptr<ecl_command_queue_node> kernel_to_poll;
+        boost::intrusive_ptr<ecl_command_queue_node<T>> kernel_to_poll;
         {
             std::unique_lock<std::mutex> lock(m_commands_list_guard);
             while (m_submitted_kernels_list.empty() && ref_count() > 1) {
@@ -21,7 +22,7 @@ void _ecl_command_queue::PollThread() {
             m_submitted_kernels_list.pop_front();
         }
         int job_instance_fd = kernel_to_poll->m_kernel->m_job_instance.job_instance_fd;
-        int status = ElcoreJobInstancePoll(job_instance_fd, m_device->m_fd);
+        int status = T::JobInstancePoll(job_instance_fd, m_device->m_fd);
 
         if (m_device->close_job(job_instance_fd) != 0)
             throw std::runtime_error("could not close job FD");
@@ -29,7 +30,7 @@ void _ecl_command_queue::PollThread() {
             std::unique_lock<std::mutex> lock(m_commands_list_guard);
             if (kernel_to_poll == m_last_command_in_queue) m_last_command_in_queue = nullptr;
         }
-        kernel_to_poll->m_event->set_command_status(status != ELCORE50_JOB_STATUS_SUCCESS
+        kernel_to_poll->m_event->set_command_status(status != T::JOB_STATUS_SUCCESS
                                                         ? -1
                                                         : ECL_COMPLETE);
     } while (ref_count() > 1);
@@ -99,7 +100,9 @@ eclCreateCommandQueueWithProperties(ecl_context context, ecl_device_id device,
     }
 
     boost::intrusive_ptr<_ecl_command_queue> command_queue(
-        new _ecl_command_queue(device, context, queue_props), false);
+        (context->getPlatform() == 0)
+        ?(ecl_command_queue)new _ecl_command_queueT<elcore50>(device, context, queue_props)
+        :(ecl_command_queue)new _ecl_command_queueT<risc1>(device, context, queue_props), false);
 
     if (errcode_ret != nullptr) *errcode_ret = ECL_SUCCESS;
 

@@ -1,4 +1,4 @@
-// Copyright 2018 RnD Center "ELVEES", JSC
+// Copyright 2018-2022 RnD Center "ELVEES", JSC
 
 #include <cassert>
 #include <memory>
@@ -7,6 +7,24 @@
 #include <utility>
 
 #include "elcore-cl.h"
+
+template <typename T>
+static ecl_kernel
+eclCreateKernelT(ecl_program program, const char* kernel_name,
+                ecl_int* errcode_ret)
+{
+    auto& kernels = program->getELF<T>()->GetKernels();
+    auto kernel_it = kernels.find(kernel_name);
+    if (kernel_it == kernels.end()) {
+        if (errcode_ret) *errcode_ret = ECL_INVALID_KERNEL_NAME;
+        return nullptr;
+    }
+    boost::intrusive_ptr<_ecl_kernel> kernel =
+        new _ecl_kernel(program, kernel_name, kernel_it->second);
+    kernel->add_ref();
+    if (errcode_ret) *errcode_ret = ECL_SUCCESS;
+    return kernel.get();
+}
 
 extern "C" ECL_API_ENTRY ecl_kernel ECL_API_CALL
 eclCreateKernel(ecl_program program, const char* kernel_name,
@@ -26,38 +44,29 @@ eclCreateKernel(ecl_program program, const char* kernel_name,
         return nullptr;
     }
 
-    auto& kernels = program->m_elf->GetKernels();
-    auto kernel_it = kernels.find(kernel_name);
-    if (kernel_it == kernels.end()) {
-        if (errcode_ret) *errcode_ret = ECL_INVALID_KERNEL_NAME;
-        return nullptr;
-    }
-    boost::intrusive_ptr<_ecl_kernel> kernel =
-        new _ecl_kernel(program, kernel_name, kernel_it->second);
-    kernel->add_ref();
-    if (errcode_ret) *errcode_ret = ECL_SUCCESS;
-    return kernel.get();
+    if (program->getPlatform() == 0)
+        return eclCreateKernelT<elcore50>(program, kernel_name, errcode_ret);
+
+    return eclCreateKernelT<risc1>(program, kernel_name, errcode_ret);
 }
 
-extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
-eclCreateKernelsInProgram(ecl_program program, ecl_uint num_kernels, ecl_kernel* kernels,
-                          ecl_uint* num_kernels_ret) ECL_API_SUFFIX__VERSION_1_0 {
-    if (program == nullptr || program->m_devices.size() == 0) return ECL_INVALID_PROGRAM;
-
-    if (program->m_build_status != ECL_BUILD_SUCCESS) return ECL_INVALID_PROGRAM_EXECUTABLE;
-
+template <typename T>
+static ecl_int eclCreateKernelsInProgramT(ecl_program program, ecl_uint num_kernels, ecl_kernel* kernels,
+                          ecl_uint* num_kernels_ret)
+{
+    auto m_elf = program->getELF<T>();
     if ((kernels != nullptr && num_kernels == 0) || (kernels == nullptr && num_kernels != 0) ||
-        (kernels && num_kernels < program->m_elf->GetKernels().size()))
+        (kernels && num_kernels < m_elf->GetKernels().size()))
         return ECL_INVALID_VALUE;
 
     for (ecl_uint i = 0; i < num_kernels; i++) kernels[i] = nullptr;
 
-    if (num_kernels > program->m_elf->GetKernels().size())
-        num_kernels = program->m_elf->GetKernels().size();
+    if (num_kernels > m_elf->GetKernels().size())
+        num_kernels = m_elf->GetKernels().size();
 
     ecl_int error_ret;
     if (num_kernels > 0 && kernels != nullptr) {
-        auto kernel_it = program->m_elf->GetKernels().cbegin();
+        auto kernel_it = m_elf->GetKernels().cbegin();
         for (ecl_uint i = 0; i < num_kernels; ++i, ++kernel_it) {
             kernels[i] = eclCreateKernel(program, kernel_it->first.c_str(), &error_ret);
 
@@ -70,8 +79,21 @@ eclCreateKernelsInProgram(ecl_program program, ecl_uint num_kernels, ecl_kernel*
         }
     }
 
-    if (num_kernels_ret) *num_kernels_ret = program->m_elf->GetKernels().size();
+    if (num_kernels_ret) *num_kernels_ret = m_elf->GetKernels().size();
     return ECL_SUCCESS;
+}
+
+extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
+eclCreateKernelsInProgram(ecl_program program, ecl_uint num_kernels, ecl_kernel* kernels,
+                          ecl_uint* num_kernels_ret) ECL_API_SUFFIX__VERSION_1_0 {
+    if (program == nullptr || program->m_devices.size() == 0) return ECL_INVALID_PROGRAM;
+
+    if (program->m_build_status != ECL_BUILD_SUCCESS) return ECL_INVALID_PROGRAM_EXECUTABLE;
+
+    if (program->getPlatform() == 0)
+        return eclCreateKernelsInProgramT<elcore50>(program, num_kernels, kernels, num_kernels_ret);
+
+    return eclCreateKernelsInProgramT<risc1>(program, num_kernels, kernels, num_kernels_ret);
 }
 
 extern "C" ECL_API_ENTRY ecl_kernel ECL_API_CALL

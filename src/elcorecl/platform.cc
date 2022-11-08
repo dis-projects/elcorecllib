@@ -1,22 +1,43 @@
-// Copyright 2018 RnD Center "ELVEES", JSC
+// Copyright 2018-2022 RnD Center "ELVEES", JSC
 
 #include <string>
 #include <cstring>
 
 #include "elcore-cl.h"
 
-_ecl_platform_id _platforms[1] = {{1}};
+struct EclPlatformId {
+    unsigned long id;
+    const char* name;
+    const char* version;
+    const char* platform_name;
+};
+
+struct EclPlatformId Elcore50PlatformId {
+    .id = 0,
+    .name = "elcore50",
+    .version = "OpenCL 2.0 elcore50, no online compiler support",
+    .platform_name = "OpenCL Elcore50 library",
+};
+
+struct EclPlatformId RISC1PlatformId {
+    .id = 1,
+    .name = "risc1",
+    .version = "OpenCL 2.0 risc1, no online compiler support",
+    .platform_name = "OpenCL RISC1 library",
+};
+
+_ecl_platform_id _platforms[2] = {{0, &Elcore50PlatformId}, {1, &RISC1PlatformId}};
 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
 eclGetPlatformIDs(ecl_uint num_entries, ecl_platform_id* platforms,
                   ecl_uint* num_platforms) ECL_API_SUFFIX__VERSION_1_0 {
-    const unsigned num = 1;
+    const unsigned num = 2;
     unsigned i;
 
     if (platforms != nullptr) {
-        if (num_entries < num) return ECL_INVALID_VALUE;
+        if (num_entries < 1) return ECL_INVALID_VALUE;
 
-        for (i = 0; i < num; ++i) platforms[i] = &_platforms[i];
+        for (i = 0; i < num && i < num_entries; ++i) platforms[i] = &_platforms[i];
     }
 
     if (num_platforms != nullptr) *num_platforms = num;
@@ -41,11 +62,11 @@ eclGetPlatformInfo(ecl_platform_id platform, ecl_platform_info param_name, size_
             break;
 
         case ECL_PLATFORM_VERSION:
-            ret = "OpenCL 2.0 elcore50, no online compiler support";
+            ret = platform->eid->version; //"OpenCL 2.0 elcore50, no online compiler support";
             break;
 
         case ECL_PLATFORM_NAME:
-            ret = "OpenCL Elcore50 library";
+            ret = platform->eid->platform_name; //"OpenCL Elcore50 library";
             break;
 
         case ECL_PLATFORM_VENDOR:

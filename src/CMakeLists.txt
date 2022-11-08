@@ -16,4 +16,5 @@ elcoreproject_add(ELCORE_RUNTIME elcore-runtime
 install(DIRECTORY ${ELCORE_RUNTIME_INSTALL_DIR}/lib DESTINATION ${CMAKE_INSTALL_PREFIX})
 
 add_subdirectory(elcore)
+add_subdirectory(risc1)
 add_subdirectory(elcorecl)

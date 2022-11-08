@@ -1,4 +1,5 @@
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+Set(CMAKE_BUILD_TYPE Debug)
 find_package(Threads REQUIRED)
 
 set(BUILD_SHARED_LIBS TRUE)
@@ -51,13 +52,14 @@ endif()
 
 set_target_properties(elcorecl PROPERTIES PUBLIC_HEADER "${HEADER}")
 target_link_libraries(elcorecl PRIVATE Boost::boost Boost::filesystem Boost::regex Threads::Threads
-                      elcore)
+                      elcore risc1)
 if(BUILD_FOR_MCOM03)
     target_compile_definitions(elcorecl PRIVATE -DBUILD_FOR_MCOM03)
 endif()
 target_include_directories(elcorecl
     PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/../../include>
       $<BUILD_INTERFACE:${ELCORE_SRC_DIR}>
+      $<BUILD_INTERFACE:${RISC1_SOURCE_DIR}>
       $<BUILD_INTERFACE:${Boost_INCLUDE_DIRS}>
       $<INSTALL_INTERFACE:include>)
 if(NOT ${ELCORE_SRC_DIR} STREQUAL "")

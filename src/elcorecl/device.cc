@@ -1,4 +1,4 @@
-// Copyright 2018 RnD Center "ELVEES", JSC
+// Copyright 2018-2022 RnD Center "ELVEES", JSC
 
 #include <list>
 #include <string>
@@ -10,6 +10,7 @@
 
 namespace {
 #ifdef EMULATE_DEVICES
+template <typename T>
 class DeviceListInitializer {
  public:
     DeviceListInitializer() {
@@ -25,33 +26,37 @@ class DeviceListInitializer {
     std::list<ecl_device_id> devices;
 };
 #else
+template <typename T>
 class DeviceListInitializer {
  public:
     DeviceListInitializer() {
         const std::string target_path("/dev/");
-        const boost::regex filter_elcore50("elcore\\d+");
+        const boost::regex filter(T::filter());
 
         boost::filesystem::directory_iterator end_itr;
         for (boost::filesystem::directory_iterator i(target_path); i != end_itr; ++i) {
             // Skip if not a file
             if (!boost::filesystem::is_other(i->status())) continue;
 
-            if (!boost::regex_match(i->path().filename().string(), filter_elcore50)) continue;
+            if (!boost::regex_match(i->path().filename().string(), filter)) continue;
 
             // File matches, store it
             int m_fd = open(i->path().string().c_str(), O_RDONLY, 0);
             if (m_fd == -1) throw std::runtime_error("can't open device");
 
-            struct elcore50_device_info device_info;
-            ioctl(m_fd, ELCORE50_IOC_GET_CORE_IDX, &device_info);
+            int device_idx = 0;
+
+            if (T::EclPlId == 0) {
+                struct T::device_info device_info;
+                ioctl(m_fd, T::IOC_GET_CORE_IDX, &device_info);
+
+                device_idx = device_info.cluster_id * device_info.cluster_cap +
+                             device_info.core_in_cluster_id;
+            }
             close(m_fd);
-
-            int device_idx = device_info.cluster_id * device_info.cluster_cap +
-                                     device_info.core_in_cluster_id;
-
             if (devices.size() <= device_idx) devices.resize(device_idx + 1, nullptr);
 
-            devices[device_idx] = new _ecl_device_id(i->path().string());
+            devices[device_idx] = new _ecl_device_idT<T>(i->path().string());
         }
 
         for (auto it = devices.begin(); it != devices.end(); ++it)
@@ -66,43 +71,65 @@ class DeviceListInitializer {
 };
 #endif
 
-DeviceListInitializer &DeviceList() {
-    static DeviceListInitializer s_dev_list;
+template <typename T>
+DeviceListInitializer<T> &DeviceList() {
+    static DeviceListInitializer<T> s_dev_list;
     return s_dev_list;
 }
 
 }
 
+template <typename T>
 bool IsDeviceValid(ecl_device_id device_id) {
-    return std::find(DeviceList().devices.cbegin(), DeviceList().devices.cend(), device_id) !=
-           DeviceList().devices.cend();
+    return std::find(DeviceList<T>().devices.cbegin(), DeviceList<T>().devices.cend(), device_id) !=
+           DeviceList<T>().devices.cend();
 }
 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
 eclGetDeviceIDs(ecl_platform_id platform, ecl_device_type device_type, ecl_uint num_entries,
                 ecl_device_id* devices, ecl_uint* num_devices) ECL_API_SUFFIX__VERSION_1_0 {
-    ecl_platform_id tmp_platform;
+    ecl_platform_id tmp_platform[2];
 
     if (platform == nullptr) return ECL_INVALID_PLATFORM;
 
     if (num_entries == 0 && devices != nullptr) return ECL_INVALID_VALUE;
     if (num_devices == nullptr && devices == nullptr) return ECL_INVALID_VALUE;
 
-    eclGetPlatformIDs(1, &tmp_platform, nullptr);
-    if (platform != tmp_platform) return ECL_INVALID_PLATFORM;
+    eclGetPlatformIDs(2, tmp_platform, nullptr);
+    if (platform != tmp_platform[0] && platform != tmp_platform[1]) return ECL_INVALID_PLATFORM;
 
     if (!(device_type & ECL_DEVICE_TYPE_CUSTOM)) return ECL_INVALID_DEVICE_TYPE;
 
-    if (DeviceList().devices.size() == 0) return ECL_DEVICE_NOT_FOUND;
-
-    if (num_devices != nullptr) *num_devices = DeviceList().devices.size();
-
     ecl_uint devices_added = 0;
 
-    if (devices != nullptr) {
-        for (auto&& device : DeviceList().devices) {
-            if (devices_added >= num_entries) break;
-            devices[devices_added++] = device;
+    if (platform->id == 0)
+    {
+        if (DeviceList<elcore50>().devices.size() == 0)
+            return ECL_DEVICE_NOT_FOUND;
+
+        if (num_devices != nullptr)
+            *num_devices = DeviceList<elcore50>().devices.size();
+
+        if (devices != nullptr) {
+            for (auto &&device : DeviceList<elcore50>().devices) {
+                if (devices_added >= num_entries)
+                    break;
+                devices[devices_added++] = device;
+            }
+        }
+    } else {
+        if (DeviceList<risc1>().devices.size() == 0)
+            return ECL_DEVICE_NOT_FOUND;
+
+        if (num_devices != nullptr)
+            *num_devices = DeviceList<risc1>().devices.size();
+
+        if (devices != nullptr) {
+            for (auto &&device : DeviceList<risc1>().devices) {
+                if (devices_added >= num_entries)
+                    break;
+                devices[devices_added++] = device;
+            }
         }
     }
 
@@ -115,7 +142,8 @@ eclGetDeviceIDs(ecl_platform_id platform, ecl_device_type device_type, ecl_uint 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
 eclGetDeviceInfo(ecl_device_id device, ecl_device_info param_name, size_t param_value_size,
                  void* param_value, size_t* param_value_size_ret) ECL_API_SUFFIX__VERSION_1_0 {
-    if (!IsDeviceValid(device)) return ECL_INVALID_DEVICE;
+    if (!IsDeviceValid<elcore50>(device) && !IsDeviceValid<risc1>(device))
+        return ECL_INVALID_DEVICE;
 
     switch (param_name) {
         case ECL_DEVICE_IMAGE_SUPPORT:
@@ -219,7 +247,11 @@ eclGetDeviceInfo(ecl_device_id device, ecl_device_info param_name, size_t param_
         case ECL_DEVICE_EXECUTION_CAPABILITIES:
             ECL_RETURN_GETINFO(ecl_device_exec_capabilities, ECL_EXEC_NATIVE_KERNEL);
         case ECL_DEVICE_NAME:
-            ECL_RETURN_GETINFO_STR("Elcore50");
+            if (device->getPlatform() == 0) {
+                ECL_RETURN_GETINFO_STR("Elcore50");
+            } else {
+                ECL_RETURN_GETINFO_STR("Risc1");
+            }
         case ECL_DEVICE_VENDOR:
             ECL_RETURN_GETINFO_STR("RnD Center \"ELVEES\", JSC");
         case ECL_DRIVER_VERSION:
@@ -311,7 +343,8 @@ extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
 eclCreateSubDevices(ecl_device_id in_device, const ecl_device_partition_property* properties,
                     ecl_uint num_devices, ecl_device_id* out_devices,
                     ecl_uint* num_devices_ret) ECL_API_SUFFIX__VERSION_1_2 {
-    if (!IsDeviceValid(in_device)) return ECL_INVALID_DEVICE;
+    if (!IsDeviceValid<elcore50>(in_device) && !IsDeviceValid<risc1>(in_device))
+        return ECL_INVALID_DEVICE;
 
     if (num_devices_ret) *num_devices_ret = 0;
 
@@ -320,14 +353,16 @@ eclCreateSubDevices(ecl_device_id in_device, const ecl_device_partition_property
 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
 eclRetainDevice(ecl_device_id device) ECL_API_SUFFIX__VERSION_1_2 {
-    if (!IsDeviceValid(device)) return ECL_INVALID_DEVICE;
+    if (!IsDeviceValid<elcore50>(device) && !IsDeviceValid<risc1>(device))
+        return ECL_INVALID_DEVICE;
 
     return ECL_SUCCESS;
 }
 
 extern "C" ECL_API_ENTRY ecl_int ECL_API_CALL
 eclReleaseDevice(ecl_device_id device) ECL_API_SUFFIX__VERSION_1_2 {
-    if (!IsDeviceValid(device)) return ECL_INVALID_DEVICE;
+    if (!IsDeviceValid<elcore50>(device) && !IsDeviceValid<risc1>(device))
+        return ECL_INVALID_DEVICE;
 
     return ECL_SUCCESS;
 }
